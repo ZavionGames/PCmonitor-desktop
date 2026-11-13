@@ -1,0 +1,9 @@
+{
+  "serverUrl": "",
+  "deviceId": "",
+  "logLevel": "INFO",
+  "trayEnabled": true,
+  "firestoreProjectId": "pcmonitors",
+  "firestoreApiKey": "AIzaSyBR1HtV434xMLnovDX26cTQNAWq259OKdw",
+  "label": ""
+}

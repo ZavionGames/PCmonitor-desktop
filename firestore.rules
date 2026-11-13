@@ -1,0 +1,80 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ── machines/{machineGuid} ───────────────────────────────────────────
+    // Auth yok — kişisel kullanım. Herkese açık okuma.
+    // Agent doğrudan yazar (REST API, request.auth = null).
+    // Panel doğrudan okur/yazar (Firebase SDK, auth yok).
+    match /machines/{machineGuid} {
+      allow read: if true;
+
+      // Agent'ın doğrudan yazımı — yalnızca 5 string alan, machineGuid == id
+      allow create, update: if request.resource.data.machineGuid == machineGuid
+        && request.resource.data.computerName is string
+        && request.resource.data.computerName.size() < 128
+        && request.resource.data.username is string
+        && request.resource.data.username.size() < 128
+        && request.resource.data.label is string
+        && request.resource.data.label.size() < 64
+        && request.resource.data.lastSeenUtc is string
+        && request.resource.data.lastSeenUtc.size() < 40
+        && request.resource.data.machineGuid is string
+        && request.resource.data.machineGuid.size() < 64
+        && request.resource.data.keys().hasOnly([
+             'machineGuid', 'computerName', 'username', 'label', 'lastSeenUtc'
+           ]);
+      allow delete: if false;
+
+      // ── logins (Agent yazar, panel okur) ─────────────────────────────
+      match /logins/{loginId} {
+        allow read: if true;
+        allow create: if request.resource.data.event == 'agent_started'
+          && request.resource.data.machineGuid == machineGuid
+          && request.resource.data.username is string
+          && request.resource.data.username.size() < 128
+          && request.resource.data.computerName is string
+          && request.resource.data.computerName.size() < 128
+          && request.resource.data.osVersion is string
+          && request.resource.data.osVersion.size() < 256
+          && request.resource.data.agentVersion is string
+          && request.resource.data.agentVersion.size() < 32
+          && request.resource.data.startedAtUtc is string
+          && request.resource.data.startedAtUtc.size() < 40
+          && request.resource.data.startedAtLocal is string
+          && request.resource.data.startedAtLocal.size() < 40
+          && request.resource.data.keys().hasOnly([
+               'event', 'machineGuid', 'username', 'computerName',
+               'osVersion', 'agentVersion', 'startedAtUtc', 'startedAtLocal'
+             ]);
+        allow update, delete: if false;
+      }
+
+      // ── Alt dokümanlar — panel ve/veya API yazar ──────────────────────
+      // Auth olmadığı için herkese açık okuma + yazma.
+      // (Kişisel kullanım — URL'i sadece siz biliyorsunuz)
+      match /state/{docId} {
+        allow read, write: if true;
+      }
+      match /settings/{docId} {
+        allow read, write: if true;
+      }
+      match /events/{eventId} {
+        allow read: if true;
+        allow create: if true;
+        allow update, delete: if false;
+      }
+      match /dailyStats/{dayKey} {
+        allow read, write: if true;
+      }
+      match /appStats/{appKey} {
+        allow read, write: if true;
+      }
+    }
+
+    // ── Diğer her şey: kapalı ─────────────────────────────────────────────
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
