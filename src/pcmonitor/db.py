@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS Events (
     DisplayName TEXT,
     SessionKey TEXT,
     DurationSeconds INTEGER,
+    Category TEXT NOT NULL DEFAULT '',
     Flags TEXT NOT NULL DEFAULT '{}',
     OccurredAtUtc TEXT NOT NULL,
     CreatedAtUtc TEXT NOT NULL,
@@ -88,6 +89,7 @@ class Database:
         self._conn.execute("PRAGMA busy_timeout=5000")
         self._conn.execute("PRAGMA journal_size_limit=1048576")
         self._conn.executescript(_SCHEMA)
+        self._ensure_category_column()
         self._conn.commit()
 
     def close(self) -> None:
@@ -100,12 +102,13 @@ class Database:
             seq = self._next_seq_locked()
             created = utc_now()
             flags = json.dumps(event.flags, ensure_ascii=False, separators=(",", ":"))
+            category = event.category if event.category in ("app", "windows") else ""
             self._conn.execute(
                 """
                 INSERT INTO Events (
                     EventId, Seq, EventType, ProcessName, DisplayName, SessionKey,
-                    DurationSeconds, Flags, OccurredAtUtc, CreatedAtUtc
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    DurationSeconds, Category, Flags, OccurredAtUtc, CreatedAtUtc
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     event_id,
@@ -115,6 +118,7 @@ class Database:
                     event.display_name,
                     event.session_key,
                     event.duration_seconds,
+                    category,
                     flags,
                     event.occurred_at_utc,
                     created,
@@ -234,8 +238,8 @@ class Database:
                 """
                 INSERT INTO Events (
                     EventId, Seq, EventType, ProcessName, DisplayName, SessionKey,
-                    DurationSeconds, Flags, OccurredAtUtc, CreatedAtUtc
-                ) VALUES (?, ?, 'process_stopped', '*', 'Özet', NULL, NULL, ?, ?, ?)
+                    DurationSeconds, Category, Flags, OccurredAtUtc, CreatedAtUtc
+                ) VALUES (?, ?, 'process_stopped', '*', 'Özet', NULL, NULL, '', ?, ?, ?)
                 """,
                 (event_id, seq, flags, now, now),
             )
@@ -352,6 +356,31 @@ class Database:
             )
             self._conn.commit()
 
+    def set_unsynced_category(self, session_key: str, category: str) -> None:
+        """Henüz gönderilmemiş süreç olayının kategorisini günceller."""
+        if category not in ("app", "windows") or not session_key:
+            return
+        with self._lock:
+            self._conn.execute(
+                """
+                UPDATE Events
+                SET Category = ?
+                WHERE SessionKey = ? AND IsSynced = 0 AND IFNULL(Category, '') != ?
+                """,
+                (category, session_key, category),
+            )
+            self._conn.commit()
+
+    def _ensure_category_column(self) -> None:
+        columns = {
+            str(row["name"])
+            for row in self._conn.execute("PRAGMA table_info(Events)")
+        }
+        if "Category" not in columns:
+            self._conn.execute(
+                "ALTER TABLE Events ADD COLUMN Category TEXT NOT NULL DEFAULT ''"
+            )
+
     def _next_seq_locked(self) -> int:
         row = self._conn.execute(
             "SELECT Value FROM State WHERE Key = ?",
@@ -386,6 +415,7 @@ def _event_from_row(row: sqlite3.Row) -> Event:
         session_key=row["SessionKey"],
         duration_seconds=None if duration is None else int(duration),
         flags=flags,
+        category=str(row["Category"] or "") if "Category" in row.keys() else "",
         occurred_at_utc=row["OccurredAtUtc"],
         created_at_utc=row["CreatedAtUtc"],
         is_synced=bool(row["IsSynced"]),

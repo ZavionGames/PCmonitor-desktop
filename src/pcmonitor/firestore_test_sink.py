@@ -455,6 +455,14 @@ def _to_app_key(process_name: str) -> str:
     return process_name.lower().translate(_APP_KEY_TRANS)
 
 
+def _process_category(event: Event) -> str:
+    """Pencere açan süreç app, arka plan windows. Bilinmeyen süreç de windows."""
+    category = (getattr(event, "category", "") or "").strip()
+    if category in ("app", "windows"):
+        return category
+    return "windows"
+
+
 def write_event_to_firestore(
     rest: FirestoreRest,
     machine_guid: str,
@@ -480,7 +488,7 @@ def write_event_to_firestore(
         fields["processName"]    = {"stringValue": event.process_name}
         fields["displayName"]    = {"stringValue": event.display_name or event.process_name}
         fields["sessionKey"]     = {"stringValue": event.session_key or ""}
-        fields["category"]       = {"stringValue": getattr(event, "category", "app") or "app"}
+        fields["category"]       = {"stringValue": _process_category(event)}
     if event.duration_seconds is not None:
         fields["durationSeconds"] = {"integerValue": str(event.duration_seconds)}
 
@@ -520,6 +528,7 @@ def write_app_stats_to_firestore(
     fields: dict[str, Any] = {
         "processName": {"stringValue": event.process_name},
         "displayName": {"stringValue": event.display_name or event.process_name},
+        "category": {"stringValue": _process_category(event)},
     }
 
     if event.event_type == "process_started":

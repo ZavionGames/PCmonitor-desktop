@@ -21,100 +21,6 @@ logger = logging.getLogger(__name__)
 DEBOUNCE_SECONDS = 3.0
 POLL_SECONDS = 2.0
 
-DEFAULT_BLOCKED_NAMES = frozenset(
-    {
-        # Windows çekirdek süreçleri
-        "svchost", "svchost.exe",
-        "explorer", "explorer.exe",
-        "dwm", "dwm.exe",
-        "csrss", "csrss.exe",
-        "wininit", "wininit.exe",
-        "services", "services.exe",
-        "lsass", "lsass.exe",
-        "winlogon", "winlogon.exe",
-        "conhost", "conhost.exe",
-        "werfault", "werfault.exe",
-        "taskhostw", "taskhostw.exe",
-        "runtimebroker", "runtimebroker.exe",
-        "searchhost", "searchhost.exe",
-        "system", "registry",
-        "smss", "smss.exe",
-        "fontdrvhost", "fontdrvhost.exe",
-        "sihost", "sihost.exe",
-        "ctfmon", "ctfmon.exe",
-        "dllhost", "dllhost.exe",
-        "applicationframehost", "applicationframehost.exe",
-        "textinputhost", "textinputhost.exe",
-        "shellexperiencehost", "shellexperiencehost.exe",
-        "startmenuexperiencehost", "startmenuexperiencehost.exe",
-        "securityhealthservice", "securityhealthservice.exe",
-        "msmpeng", "msmpeng.exe",
-        "nissrv", "nissrv.exe",
-        "memory compression", "idle", "secure system",
-        "searchindexer", "searchindexer.exe",
-        "spoolsv", "spoolsv.exe",
-        "wmiprvse", "wmiprvse.exe",
-        "tiworker", "tiworker.exe",
-        "trustedinstaller", "trustedinstaller.exe",
-        "msdtc", "msdtc.exe",
-        "lsaiso", "lsaiso.exe",
-        # Windows Update / bakım
-        "wuauclt", "wuauclt.exe",
-        "musnotification", "musnotification.exe",
-        "musnotificationux", "musnotificationux.exe",
-        "updatenotificationmgr", "updatenotificationmgr.exe",
-        "usocoreworker", "usocoreworker.exe",
-        "usoclient", "usoclient.exe",
-        "waasmedicagent", "waasmedicagent.exe",
-        "sedsvc", "sedsvc.exe",
-        # Güvenlik / AV arka plan servisleri
-        "mpcmdrun", "mpcmdrun.exe",
-        "securityhealthsystray", "securityhealthsystray.exe",
-        "smartscreen", "smartscreen.exe",
-        "wscsvc", "wscsvc.exe",
-        "msseces", "msseces.exe",
-        # Telemetri / diagnostics
-        "compattelrunner", "compattelrunner.exe",
-        "diaghost", "diaghost.exe",
-        "diagtrack", "diagtrack.exe",
-        "wsqmcons", "wsqmcons.exe",
-        "pcasvc", "pcasvc.exe",
-        "dxdiag", "dxdiag.exe",
-        # Tarayıcı yardımcı süreçleri (Chrome/Edge/Firefox alt süreçleri)
-        # Bunlar ana exe ile aynı isimde gelir, gruplama zaten tek oturum yapıyor
-        # Ancak bu isimleri tamamen bloklamak istemiyoruz — gruplama yeterli
-        # Runtime / framework altyapısı
-        "taskmgr", "taskmgr.exe",
-        "msiexec", "msiexec.exe",
-        "regsvr32", "regsvr32.exe",
-        "rundll32", "rundll32.exe",
-        "wscript", "wscript.exe",
-        "cscript", "cscript.exe",
-        "cmd", "cmd.exe",
-        "powershell", "powershell.exe",
-        "pwsh", "pwsh.exe",
-        # Sistem tepsisi yardımcıları
-        "igfxem", "igfxem.exe",
-        "igfxtray", "igfxtray.exe",
-        "igfxhk", "igfxhk.exe",
-        "nvdisplay.container.exe",
-        "nvcontainer", "nvcontainer.exe",
-        "nvspcaps64", "nvspcaps64.exe",
-        "amdow", "amdow.exe",
-        "radeoninstaller", "radeoninstaller.exe",
-        # Ses / cihaz servisleri
-        "audiodg", "audiodg.exe",
-        "soundswitch", "soundswitch.exe",
-        # OneDrive / bulut sync arka plan
-        "onedrive", "onedrive.exe",
-        "googledrivefs", "googledrivefs.exe",
-        # PCMonitor'ün kendisi
-        "python", "python.exe",
-        "pythonw", "pythonw.exe",
-        "pcmonitor", "pcmonitor.exe",
-    }
-)
-
 
 @dataclass(frozen=True)
 class FilterConfig:
@@ -141,6 +47,7 @@ class TrackedSession:
     announced: bool
     initial: bool
     exe: str | None = None
+    category: str = ""
     pids: set[tuple[int, float]] = field(default_factory=set)
 
     def export(self) -> dict[str, Any]:
@@ -152,6 +59,8 @@ class TrackedSession:
             "startedEpoch": self.started_epoch,
             "announced": self.announced,
             "initial": self.initial,
+            "exe": self.exe,
+            "category": self.category,
             "pids": [[pid, created] for pid, created in sorted(self.pids)],
         }
 
@@ -163,6 +72,7 @@ class ProcessTracker:
         self.sessions: dict[str, TrackedSession] = {}
         self.last_scan_epoch: float | None = None
         self._reconciled = False
+        self.category_upgrades: list[str] = []
         if not snapshot:
             return
         last_scan = snapshot.get("lastScanEpoch")
@@ -177,14 +87,28 @@ class ProcessTracker:
                 if isinstance(pair, (list, tuple)) and len(pair) == 2
             }
             started = float(item.get("startedEpoch", 0))
-            self.sessions[str(item["identity"])] = TrackedSession(
-                identity=str(item["identity"]),
+            identity = str(item["identity"])
+            raw_exe = item.get("exe")
+            if isinstance(raw_exe, str) and raw_exe:
+                exe = raw_exe
+            elif identity.startswith("name:"):
+                exe = None
+            else:
+                exe = identity
+            raw_category = item.get("category")
+            category = raw_category if raw_category in ("app", "windows") else ""
+            # Eski anlık görüntüde kategori yoktu; bir kez doğru sınıfla yeniden duyur.
+            announced = bool(item.get("announced", False)) and bool(category)
+            self.sessions[identity] = TrackedSession(
+                identity=identity,
                 process_name=str(item.get("processName") or ""),
                 display_name=str(item.get("displayName") or ""),
                 session_key=str(item.get("sessionKey") or ""),
                 started_epoch=started,
-                announced=bool(item.get("announced", False)),
+                announced=announced,
                 initial=bool(item.get("initial", False)),
+                exe=exe,
+                category=category,
                 pids=pids,
             )
 
@@ -195,6 +119,7 @@ class ProcessTracker:
         }
 
     def apply(self, procs: list[ProcSample], now_epoch: float) -> list[Event]:
+        self.category_upgrades = []
         grouped = _group(procs)
         if not self._reconciled:
             events = self._reconcile(grouped, now_epoch)
@@ -220,15 +145,18 @@ class ProcessTracker:
                 continue
             session.pids = _pid_set(grouped[identity])
             session.display_name = grouped[identity][0].display_name or session.display_name
+            self._refresh_category(session, grouped[identity])
         for identity, samples in grouped.items():
             if identity in self.sessions:
                 session = self.sessions[identity]
                 if not session.announced and _age(now_epoch, session.started_epoch) >= DEBOUNCE_SECONDS:
+                    self._refresh_category(session, samples)
                     session.announced = True
                     events.append(_started(session, initial=False))
                 continue
             session = _new_session(identity, samples, initial=True, announced=True)
             self.sessions[identity] = session
+            self._refresh_category(session, samples)
             events.append(_started(session, initial=True))
         return events
 
@@ -247,6 +175,7 @@ class ProcessTracker:
                 continue
             session.pids = _pid_set(grouped[identity])
             session.display_name = grouped[identity][0].display_name or session.display_name
+            self._refresh_category(session, grouped[identity])
             if not session.announced and _age(now_epoch, session.started_epoch) >= DEBOUNCE_SECONDS:
                 session.announced = True
                 events.append(_started(session, initial=False))
@@ -255,16 +184,24 @@ class ProcessTracker:
                 continue
             session = _new_session(identity, samples, initial=False, announced=False)
             self.sessions[identity] = session
+            self._refresh_category(session, samples)
             if _age(now_epoch, session.started_epoch) >= DEBOUNCE_SECONDS:
                 session.announced = True
                 events.append(_started(session, initial=False))
         return events
 
+    def _refresh_category(self, session: TrackedSession, samples: list[ProcSample]) -> None:
+        sample_exe = samples[0].exe if samples else None
+        if sample_exe:
+            session.exe = sample_exe
+        already = session.announced
+        if _promote_category(session) and already and session.session_key:
+            self.category_upgrades.append(session.session_key)
+
 
 def is_tracked(
     sample: ProcSample,
     filt: FilterConfig,
-    windir: str,
     own_pids: set[int],
 ) -> bool:
     if sample.pid in own_pids or sample.pid <= 4:
@@ -277,33 +214,12 @@ def is_tracked(
     exe = sample.exe or ""
     if _matches_any(folded, stem, exe, filt.ignored):
         return False
-    explicitly = _matches_any(folded, stem, exe, filt.tracked)
-    blocked = folded in DEFAULT_BLOCKED_NAMES or f"{stem}.exe" in DEFAULT_BLOCKED_NAMES or stem in {
-        Path(item).stem for item in DEFAULT_BLOCKED_NAMES
-    }
-    if blocked and not explicitly:
-        return False
-    if exe and _under_windir(exe, windir) and not explicitly:
-        return False
-    if filt.tracked and not explicitly:
+    if filt.tracked and not _matches_any(folded, stem, exe, filt.tracked):
         return False
     return True
 
 
-def needs_exe_lookup(name: str, filt: FilterConfig) -> bool:
-    if any(_is_path_token(token) for token in filt.tracked) or any(
-        _is_path_token(token) for token in filt.ignored
-    ):
-        return True
-    folded = name.casefold()
-    stem = Path(name).stem.casefold()
-    if _matches_any(folded, stem, "", filt.tracked):
-        return True
-    blocked = folded in DEFAULT_BLOCKED_NAMES or stem in {Path(item).stem for item in DEFAULT_BLOCKED_NAMES}
-    return not blocked
-
-
-def list_processes(filt: FilterConfig, own_pids: set[int], windir: str) -> list[ProcSample]:
+def list_processes(filt: FilterConfig, own_pids: set[int]) -> list[ProcSample]:
     import psutil
 
     samples: list[ProcSample] = []
@@ -323,17 +239,15 @@ def list_processes(filt: FilterConfig, own_pids: set[int], windir: str) -> list[
         )
         if pid in own_pids or pid <= 4:
             continue
-        exe: str | None = None
-        if needs_exe_lookup(str(name), filt):
-            exe = _query_exe(proc, pid)
-            preliminary = ProcSample(
-                pid=pid,
-                name=str(name),
-                create_time=float(created),
-                exe=exe,
-                display_name=Path(exe).stem if exe else (Path(str(name)).stem or str(name)),
-            )
-        if is_tracked(preliminary, filt, windir, own_pids):
+        exe = _query_exe(proc, pid)
+        preliminary = ProcSample(
+            pid=pid,
+            name=str(name),
+            create_time=float(created),
+            exe=exe,
+            display_name=Path(exe).stem if exe else (Path(str(name)).stem or str(name)),
+        )
+        if is_tracked(preliminary, filt, own_pids):
             samples.append(preliminary)
     return samples
 
@@ -381,7 +295,7 @@ def _query_exe(proc: object, pid: int) -> str | None:
         return str(exe)
     fallback = _query_full_image_name(pid)
     if fallback is None:
-        logger.info("Yürütülebilir yol alınamadı pid=%s", pid)
+        logger.debug("Yürütülebilir yol alınamadı pid=%s", pid)
     return fallback
 
 
@@ -511,11 +425,116 @@ def _is_service_exe(exe: str) -> bool:
     return normalized in _SERVICE_PATHS
 
 
-def _get_window_exe_paths() -> frozenset[str]:
-    """Görünür penceresi olan süreçlerin EXE yollarını döner.
 
-    Aynı exe'den bir tane bile pencereye sahipse, o exe'nin tüm
-    süreçleri "app" kategorisine girer (ör. Chrome renderer süreçleri).
+# Görev çubuğunda görünen pencere: araç penceresi değil, sahibi yok
+# ya da WS_EX_APPWINDOW ile özellikle uygulama penceresi olarak işaretli.
+_WS_EX_TOOLWINDOW = 0x00000080
+_WS_EX_APPWINDOW = 0x00040000
+_GWL_EXSTYLE = -20
+_GW_OWNER = 4
+_DWMWA_CLOAKED = 14
+
+
+def _normalize_exe(path: str) -> str:
+    return os.path.normcase(os.path.normpath(path))
+
+
+def _image_path(kernel32: Any, pid: int) -> str | None:
+    """Süreç kimliğinden exe yolu. Erişilemezse None."""
+    import ctypes
+    from ctypes import wintypes
+
+    handle = kernel32.OpenProcess(0x1000, False, pid)
+    if not handle:
+        return None
+    try:
+        size = wintypes.DWORD(1024)
+        buf = ctypes.create_unicode_buffer(size.value)
+        if not kernel32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)):
+            return None
+        value = buf.value.strip()
+        return _normalize_exe(value) if value else None
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def _window_aumid(hwnd: int) -> str | None:
+    """UWP çerçeve penceresinin paket kimliği."""
+    try:
+        from win32com.propsys import propsys, pscon
+
+        value = propsys.SHGetPropertyStoreForWindow(hwnd).GetValue(pscon.PKEY_AppUserModel_ID).GetValue()
+    except Exception:
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+        return text or None
+    return None
+
+
+def _exes_for_aumids(aumids: set[str]) -> dict[str, str]:
+    """Paket kimliğini, o paketi çalıştıran exe yoluna çevir."""
+    if not aumids:
+        return {}
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        import psutil
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        open_process = kernel32.OpenProcess
+        open_process.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        open_process.restype = wintypes.HANDLE
+        get_aumid = kernel32.GetApplicationUserModelId
+        get_aumid.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.UINT), wintypes.LPWSTR]
+        get_aumid.restype = wintypes.LONG
+        query_name = kernel32.QueryFullProcessImageNameW
+        query_name.argtypes = [
+            wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD),
+        ]
+        query_name.restype = wintypes.BOOL
+        close_handle = kernel32.CloseHandle
+        close_handle.argtypes = [wintypes.HANDLE]
+        close_handle.restype = wintypes.BOOL
+
+        found: dict[str, str] = {}
+        remaining = set(aumids)
+        for proc in psutil.process_iter(["pid"]):
+            if not remaining:
+                break
+            pid = proc.info.get("pid")
+            if not isinstance(pid, int) or pid <= 4:
+                continue
+            handle = open_process(0x1000, False, pid)
+            if not handle:
+                continue
+            try:
+                length = wintypes.UINT(512)
+                buf = ctypes.create_unicode_buffer(length.value)
+                if get_aumid(handle, ctypes.byref(length), buf) != 0:
+                    continue
+                if buf.value not in remaining:
+                    continue
+                size = wintypes.DWORD(1024)
+                image = ctypes.create_unicode_buffer(size.value)
+                if query_name(handle, 0, image, ctypes.byref(size)) and image.value:
+                    found[buf.value] = _normalize_exe(image.value)
+                    remaining.discard(buf.value)
+            finally:
+                close_handle(handle)
+        return found
+    except Exception:
+        logger.debug("UWP uygulama yolu alınamadı", exc_info=True)
+        return {}
+
+
+def _get_window_exe_paths() -> frozenset[str]:
+    """Kullanıcının açtığı pencerenin exe yolları.
+
+    Görev çubuğuna düşen pencere uygulamadır: görünür, başlıklı,
+    kabuk tarafından gizlenmemiş, araç penceresi değil.
+    UWP çerçevesi ApplicationFrameHost yerine asıl uygulamaya yazılır.
     """
     global _WINDOW_EXE_CACHE, _WINDOW_CACHE_TIME
     now = time.time()
@@ -529,118 +548,147 @@ def _get_window_exe_paths() -> frozenset[str]:
 
         user32 = ctypes.WinDLL("user32", use_last_error=True)
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        dwmapi = ctypes.WinDLL("dwmapi", use_last_error=True)
 
-        # EnumWindows
-        get_window_thread_process_id = user32.GetWindowThreadProcessId
-        get_window_thread_process_id.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
-        get_window_thread_process_id.restype = wintypes.DWORD
-        is_window_visible = user32.IsWindowVisible
-        is_window_visible.argtypes = [wintypes.HWND]
-        is_window_visible.restype = wintypes.BOOL
-        get_window_text_length = user32.GetWindowTextLengthW
-        get_window_text_length.argtypes = [wintypes.HWND]
-        get_window_text_length.restype = ctypes.c_int
-
-        # OpenProcess + QueryFullProcessImageNameW
-        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-        OpenProcess = kernel32.OpenProcess
-        OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
-        OpenProcess.restype = wintypes.HANDLE
-        QueryFullProcessImageNameW = kernel32.QueryFullProcessImageNameW
-        QueryFullProcessImageNameW.argtypes = [
-            wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR,
-            ctypes.POINTER(wintypes.DWORD),
+        get_pid = user32.GetWindowThreadProcessId
+        get_pid.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+        get_pid.restype = wintypes.DWORD
+        is_visible = user32.IsWindowVisible
+        is_visible.argtypes = [wintypes.HWND]
+        is_visible.restype = wintypes.BOOL
+        text_length = user32.GetWindowTextLengthW
+        text_length.argtypes = [wintypes.HWND]
+        text_length.restype = ctypes.c_int
+        get_window = user32.GetWindow
+        get_window.argtypes = [wintypes.HWND, ctypes.c_uint]
+        get_window.restype = wintypes.HWND
+        get_class_name = user32.GetClassNameW
+        get_class_name.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+        get_class_name.restype = ctypes.c_int
+        get_exstyle = getattr(user32, "GetWindowLongPtrW", user32.GetWindowLongW)
+        get_exstyle.argtypes = [wintypes.HWND, ctypes.c_int]
+        get_exstyle.restype = ctypes.c_ssize_t
+        dwm_get = dwmapi.DwmGetWindowAttribute
+        dwm_get.argtypes = [wintypes.HWND, ctypes.c_uint, ctypes.c_void_p, ctypes.c_uint]
+        dwm_get.restype = ctypes.c_long
+        open_process = kernel32.OpenProcess
+        open_process.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        open_process.restype = wintypes.HANDLE
+        query_name = kernel32.QueryFullProcessImageNameW
+        query_name.argtypes = [
+            wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD),
         ]
-        QueryFullProcessImageNameW.restype = wintypes.BOOL
-        CloseHandle = kernel32.CloseHandle
-        CloseHandle.argtypes = [wintypes.HANDLE]
-        CloseHandle.restype = wintypes.BOOL
+        query_name.restype = wintypes.BOOL
+        close_handle = kernel32.CloseHandle
+        close_handle.argtypes = [wintypes.HANDLE]
+        close_handle.restype = wintypes.BOOL
 
-        window_pids: set[int] = set()
+        direct_pids: set[int] = set()
+        frames: list[tuple[int, str | None]] = []
+
+        def is_user_window(hwnd: int) -> bool:
+            if not is_visible(hwnd) or text_length(hwnd) <= 0:
+                return False
+            cloaked = ctypes.c_int(0)
+            if dwm_get(hwnd, _DWMWA_CLOAKED, ctypes.byref(cloaked), ctypes.sizeof(cloaked)) == 0:
+                if cloaked.value:
+                    return False
+            exstyle = int(get_exstyle(hwnd, _GWL_EXSTYLE)) & 0xFFFFFFFF
+            owner = get_window(hwnd, _GW_OWNER)
+            tool_window = bool(exstyle & _WS_EX_TOOLWINDOW)
+            app_window = bool(exstyle & _WS_EX_APPWINDOW)
+            return app_window or (not owner and not tool_window)
 
         @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
         def enum_callback(hwnd: int, _lparam: int) -> bool:
-            if is_window_visible(hwnd) and get_window_text_length(hwnd) > 0:
-                pid = wintypes.DWORD(0)
-                get_window_thread_process_id(hwnd, ctypes.byref(pid))
-                if pid.value:
-                    window_pids.add(pid.value)
+            if not is_user_window(hwnd):
+                return True
+            pid = wintypes.DWORD(0)
+            get_pid(hwnd, ctypes.byref(pid))
+            class_name = ctypes.create_unicode_buffer(256)
+            get_class_name(hwnd, class_name, 256)
+            if class_name.value == "ApplicationFrameWindow" and pid.value:
+                frames.append((pid.value, _window_aumid(int(hwnd))))
+            elif pid.value:
+                direct_pids.add(pid.value)
             return True
 
         user32.EnumWindows(enum_callback, 0)
 
-        # Her pencere PID'i için exe yolunu al
-        for pid in window_pids:
+        for pid in direct_pids:
             try:
-                handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
-                if handle:
-                    try:
-                        buf = ctypes.create_unicode_buffer(1024)
-                        size = wintypes.DWORD(1024)
-                        if QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)):
-                            exe_paths.add(os.path.normcase(os.path.normpath(buf.value)))
-                    finally:
-                        CloseHandle(handle)
+                exe = _image_path(kernel32, pid)
             except Exception:
-                pass
+                exe = None
+            if exe:
+                exe_paths.add(exe)
+
+        hosted = _exes_for_aumids({aumid for _, aumid in frames if aumid})
+        for pid, aumid in frames:
+            exe = hosted.get(aumid or "")
+            if exe:
+                exe_paths.add(exe)
+                continue
+            try:
+                fallback = _image_path(kernel32, pid)
+            except Exception:
+                fallback = None
+            if fallback:
+                exe_paths.add(fallback)
     except Exception:
-        pass
+        logger.debug("Kullanıcı penceresi taranamadı", exc_info=True)
 
     _WINDOW_EXE_CACHE = frozenset(exe_paths)
     _WINDOW_CACHE_TIME = now
     return _WINDOW_EXE_CACHE
 
 
-def _get_pids_with_windows() -> set[int]:
-    """Görünür penceresi olan PID'leri döner (geriye dönuk uyumluluk için)."""
-    # Basit implementasyon: pencere olan exe yollarını dönen fonksiyonu çağır
-    # ama PID lazımdır, boş set dön (artık kullanılmıyor)
-    return set()
-
-
 def _categorize_exe(exe: str | None, pid: int = 0) -> str:
-    """Kategori belirle.
-
-    1. Aynı exe'den birinde pencere varsa → "app" (kullanıcı görüyor)
-    2. C:\\Windows\\ altı (penceresiz)  → "windows"
-    3. Yoksa                           → "windows"
-    """
+    """Kullanıcı penceresi olan exe uygulama, geri kalan her şey Windows."""
+    del pid
     if not exe:
         return "windows"
-
-    normalized = os.path.normcase(os.path.normpath(exe))
-
-    # ÖNCE pencere kontrolü — kullanıcı açtığı her şey "app"
-    # (Notepad C:\Windows altında ama kullanıcı açtı → app)
-    window_exes = _get_window_exe_paths()
-    if normalized in window_exes:
+    if _normalize_exe(exe) in _get_window_exe_paths():
         return "app"
+    return "windows"
 
-    # Pencere yoksa C:\Windows altı → windows
-    windir = os.path.normcase(os.path.normpath(os.environ.get("WINDIR", r"C:\Windows")))
-    if normalized.startswith(windir + os.sep):
-        return "windows"
 
+def _promote_category(session: TrackedSession) -> bool:
+    """Kategoriyi pencere durumuna göre yaz.
+
+    Uygulama bir kez pencere açtıysa oturum uygulama kalır.
+    Pencere sonradan açılırsa arka plan oturumu uygulamaya yükselir.
+    """
+    if session.category == "app":
+        return False
+    if _categorize_exe(session.exe) == "app":
+        session.category = "app"
+        return True
+    if session.category not in ("app", "windows"):
+        session.category = "windows"
+    return False
+
+
+def _session_category(session: TrackedSession) -> str:
+    if session.category in ("app", "windows"):
+        return session.category
     return "windows"
 
 
 def _started(session: TrackedSession, *, initial: bool) -> Event:
-    # İlk pid'i al (kategori için)
-    first_pid = next(iter(session.pids), (0, 0))[0]
     return Event(
         event_type=PROCESS_STARTED,
         occurred_at_utc=iso_from_epoch(session.started_epoch),
         process_name=session.process_name,
         display_name=session.display_name,
         session_key=session.session_key,
-        category=_categorize_exe(session.exe, first_pid),
+        category=_session_category(session),
         flags={"initial": initial, "inferred": False},
     )
 
 
 def _stopped(session: TrackedSession, ended_epoch: float, *, inferred: bool) -> Event:
     duration = int(max(0, ended_epoch - session.started_epoch))
-    first_pid = next(iter(session.pids), (0, 0))[0]
     return Event(
         event_type=PROCESS_STOPPED,
         occurred_at_utc=iso_from_epoch(ended_epoch),
@@ -648,7 +696,7 @@ def _stopped(session: TrackedSession, ended_epoch: float, *, inferred: bool) -> 
         display_name=session.display_name,
         session_key=session.session_key,
         duration_seconds=duration,
-        category=_categorize_exe(session.exe, first_pid),
+        category=_session_category(session),
         flags={"initial": False, "inferred": inferred},
     )
 
@@ -681,16 +729,6 @@ def _match_token(folded_name: str, stem: str, exe: str, token: str) -> bool:
 
 def _is_path_token(token: str) -> bool:
     return "\\" in token or "/" in token or ":" in token
-
-
-def _under_windir(exe: str, windir: str) -> bool:
-    try:
-        path = Path(os.path.normcase(os.path.normpath(exe)))
-        root = Path(os.path.normcase(os.path.normpath(windir)))
-        path.relative_to(root)
-        return True
-    except ValueError:
-        return False
 
 
 class ProcessMonitor:
@@ -744,7 +782,7 @@ class ProcessMonitor:
 
     def _scan(self, now: float) -> None:
         filt = self._filter_provider()  # type: ignore[operator]
-        samples = list_processes(filt, {self._own_pid}, windir_path())
+        samples = list_processes(filt, {self._own_pid})
         named: list[ProcSample] = []
         for sample in samples:
             display = display_name_for(sample.exe, sample.display_name, self._names)
@@ -761,11 +799,14 @@ class ProcessMonitor:
         for event in events:
             stored = self._db.add_event(event)  # type: ignore[attr-defined]
             logger.info(
-                "Olay %s %s session=%s",
+                "Olay %s %s session=%s category=%s",
                 stored.event_type,
                 stored.process_name,
                 stored.session_key,
+                stored.category,
             )
+        for session_key in self._tracker.category_upgrades:
+            self._db.set_unsynced_category(session_key, "app")  # type: ignore[attr-defined]
         self._db.set_state(  # type: ignore[attr-defined]
             self._state_apps,
             self._json.dumps(self._tracker.export_snapshot(), ensure_ascii=False),
