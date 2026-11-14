@@ -534,14 +534,31 @@ def write_app_stats_to_firestore(
     if event.event_type == "process_started":
         fields["lastStartedAt"] = {"stringValue": event.occurred_at_utc}
         fields["isRunning"]     = {"booleanValue": True}
-        # launchCount artırımı: Firestore REST'te increment için transform kullanmak gerek
-        # Basit yaklaşım: önce oku, +1 yaz. Kota tasarrufu için sadece PATCH yapıyoruz.
-        # isRunning=true ve lastStartedAt zaten yeterli panel için.
     else:
         fields["lastStoppedAt"] = {"stringValue": event.occurred_at_utc}
         fields["isRunning"]     = {"booleanValue": False}
         if event.duration_seconds is not None:
             fields["totalSeconds"] = {"integerValue": str(event.duration_seconds)}
+
+    # Önce mevcut dokümanı oku, launchCount ve totalSeconds'ı topla
+    get_url = rest._documents_url(doc_path)
+    try:
+        get_resp = rest._client.get(get_url, params={"key": rest.api_key})
+        if get_resp.status_code == 200:
+            existing = get_resp.json().get("fields", {})
+            old_launch = int(existing.get("launchCount", {}).get("integerValue", 0))
+            old_total  = int(existing.get("totalSeconds", {}).get("integerValue", 0))
+        else:
+            old_launch = 0
+            old_total  = 0
+    except Exception:
+        old_launch = 0
+        old_total  = 0
+
+    if event.event_type == "process_started":
+        fields["launchCount"] = {"integerValue": str(old_launch + 1)}
+    elif event.event_type == "process_stopped" and event.duration_seconds is not None:
+        fields["totalSeconds"] = {"integerValue": str(old_total + event.duration_seconds)}
 
     update_fields = list(fields.keys())
     params: list[tuple[str, str]] = [
@@ -557,9 +574,11 @@ def write_app_stats_to_firestore(
         return WriteStatus(False, False, True, redact(str(exc), rest.api_key))
 
     if response.status_code < 400:
-        return WriteStatus(True, False, False, f"appStats güncellendi")
+        return WriteStatus(True, False, False, "appStats güncellendi")
     # 404 → doküman yok, POST ile oluştur
     if response.status_code == 404:
+        if event.event_type == "process_started":
+            fields["launchCount"] = {"integerValue": "1"}
         try:
             r2 = rest._client.post(
                 rest._documents_url(
@@ -638,8 +657,9 @@ def flush_events_direct(
             if status.retriable:
                 break  # ağ hatası → dur
 
-        # 2. appStats güncelle (process olayları için)
+        # 2. appStats güncelle (sadece category=app olan process olayları için)
         if event.event_type in ("process_started", "process_stopped"):
-            write_app_stats_to_firestore(rest, machine_guid, event)
+            if _process_category(event) == "app":
+                write_app_stats_to_firestore(rest, machine_guid, event)
 
     return written
